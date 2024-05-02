@@ -4,10 +4,19 @@ import re
 from typing import Union
 
 import aiohttp
+import netifaces
+import urllib.parse
+from ssdpy import SSDPClient
 from xml.dom import minidom
 from xml.etree import ElementTree
 from lxml import etree
-import urllib.parse
+from ssdpy.protocol import create_msearch_payload
+from ssdpy.http_helper import parse_headers
+
+
+async def find_gateways():
+    default = netifaces.gateways()['default']
+    return [default[i][0] for i in default]
 
 
 def get_host(url):
@@ -22,6 +31,21 @@ def _substitute_newlines_with_space(match):
 class DIRECTION:
     In = 0
     Out = 1
+
+
+class ISSDPClient(SSDPClient):
+    async def m_search(self, st="ssdp:all", mx=1):
+        host = "{}:{}".format(self.broadcast_ip, self.port)
+        data = create_msearch_payload(host, st, mx)
+        self.send(data)
+        for response in self.recv():
+            try:
+                headers = parse_headers(response)
+                yield headers
+            except ValueError:
+                pass
+        print(" * Finished SSDP Discovery")
+        return
 
 
 class SOAP:
@@ -159,13 +183,17 @@ class SSDPActions:
 
     @classmethod
     async def from_url(cls, parent, loc):
-        async with aiohttp.ClientSession() as session:
-            async with session.get(loc) as response:
-                if response.status != 200:
-                    print(f"Error fetching {loc}: {response.status}")
-                    return
-                else:
-                    obj = cls(parent, loc, await response.read())
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(loc) as response:
+                    if response.status != 200:
+                        print(f"Error fetching {loc}: {response.status}")
+                        return
+                    else:
+                        obj = cls(parent, loc, await response.read())
+        except Exception as error:
+            print(f"Failed fetching {loc} : {error}")
+            return
 
         for var in obj.root.getElementsByTagName('stateVariable'):
             name = var.getElementsByTagName('name')[0].firstChild.nodeValue
@@ -255,13 +283,21 @@ class SSDPDevice:
                       f" out:{tuple([i for i in action.out_args])}")
 
 
+async def search_all():
+    cli = ISSDPClient()
+    remotes = []
+    async for i in cli.m_search():
+        if not i['location'] in remotes:
+            remotes.append(i['location'])
+            yield SSDPDevice.from_url(i['location'])
+        else:
+            continue
+
+
 async def main():
-    dev = await SSDPDevice.from_url('http://10.168.1.1:5000/rootDesc.xml')
-    dev.trace()
-    serv = dev.find_service('urn:schemas-upnp-org:service:WANCommonInterfaceConfig:1')
-    print(serv)
-    act = serv.actions['GetTotalBytesSent']
-    print(await act.do_action())
+    async for i in search_all():
+        device = await i
+        print(device)
 
 
 if __name__ == '__main__':
